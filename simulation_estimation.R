@@ -7,9 +7,9 @@ source("packages.R")
   lapply(source)
 
 # simulatge 'true' data
-true_gi <- list(meanlog = 1.2, sdlog = 0.4)
+true_gi <- list(meanlog = 1.2, sdlog = 0.4) #logscale
 hist(rlnorm(1e5, true_gi$meanlog, true_gi$sdlog), breaks = 100)
-n <- 1000
+n <- 10000
 truth <- sim_truth(n, true_gi$meanlog, true_gi$sdlog)
 
 # don't observe all dates for all individuals
@@ -30,25 +30,25 @@ gi_sdlog <- normal(0.567, 0.0858, truncation = c(0, Inf))
 
 # observation error to reflect potential for miscoding of dates (sd of
 # interval-censored normal)
-obs_sd_symptom_onset <- normal(0, 0.1, truncation = c(0, Inf))
-obs_sd_infection <- normal(0, 0.1, truncation = c(0, Inf))
-obs_sd_isolation <- normal(0, 0.1, truncation = c(0, Inf))
+obs_sd_symptom_onset <- normal(0, 0.05, truncation = c(0, Inf))
+obs_sd_infection <- normal(0, 0.05, truncation = c(0, Inf))
+obs_sd_isolation <- normal(0, 0.05, truncation = c(0, Inf))
 
 # latent case infection date (all other dates defined from this via delays)
 case_infection  <- variable(dim = n)
 
 # time to isolation
-case_infection_to_isolation  <- lognormal(1, 0.5, dim = n)
+case_infection_to_isolation  <- lognormal(1, 0.5, dim = n) #moderately informative prior
 case_isolation <- case_infection + case_infection_to_isolation 
 
-# define generation interval - contrained to not extend beyond the date of
+# define generation interval - constrained to not extend beyond the date of
 # isolation
 generation_interval <- right_censored_lognormal(
   meanlog = gi_meanlog,
   sdlog = gi_sdlog, 
-  upper = case_infection_to_isolation,
+  upper = case_infection_to_isolation, 
   dim = n
-)
+) #lets us use isolate date to constrain and get better estimates
 
 # compute contact infection date
 contact_infection <- case_infection + generation_interval
@@ -58,7 +58,7 @@ case_incubation <- lognormal(incubation_meanlog, incubation_sdlog, dim = n)
 contact_incubation <- lognormal(incubation_meanlog, incubation_sdlog, dim = n)
 
 # define symptoms onset dates for these
-case_symptom_onset <- case_infection + case_incubation
+case_symptom_onset <- case_infection + case_incubation #in theory would run pairs but based on symptoms
 contact_symptom_onset <- contact_infection + contact_incubation
 
 # define likelihoods for all observed dates
@@ -90,8 +90,8 @@ prob_contact_symptom_onset <- define_date_likelihood(
 
 m <- model(gi_meanlog, gi_sdlog, obs_sd_infection, obs_sd_isolation, obs_sd_symptom_onset)
 
-n_chains <- 4
-inits <- replicate(
+n_chains <- 8
+inits <- replicate( #Golding 2024 'bit of a faff'
   n_chains,
   impute_initials(
     observations,
@@ -101,25 +101,57 @@ inits <- replicate(
   simplify = FALSE
 )
 
-draws <- mcmc(m, chains = n_chains, initial_values = inits) 
+draws <- mcmc(m, chains = n_chains, initial_values = inits, warmup= 2000) 
 
 coda::gelman.diag(draws, autoburnin = FALSE, multivariate = FALSE)
 plot(draws)
 summary(draws)
 true_gi
 
+library (bayesplot)
+mcmc_trace(draws)
+mcmc_intervals(draws)
+
 indices <- 1:8
 pred_draws <- calculate(contact_infection[indices], values = draws)
-plot(pred_draws)
+plot(pred_draws) #GI
 
-cbind(
+pred_draws <- calculate(contact_infection, values = draws)
+plot(pred_draws) #GI
+
+generation_interval <- cbind(
   truth$contact_infection_date[indices],
   observations$contact_infection_date[indices],
   summary(pred_draws)$statistics[, "Mean"]
-)
+) #possibly too much error in here, margins of 5 from truth to observed
 
 
-si <- contact_symptom_onset - case_symptom_onset
+generation_interval <- data.frame(generation_interval)
+                              
+colnames(generation_interval) <- c("truth", "observations", "mean_estimate")
+
+
+#plot estimated GI against truth
+
+ggplot(generation_interval, aes(x = mean_estimate)) + geom_histogram(bins = 20) +
+  geom_histogram(aes(x = truth), bins = 20, fill = "blue")
+
+mean(generation_interval$mean_estimate)
+mean(generation_interval$truth)
+
+hist(rlnorm(1e5, true_gi$meanlog, true_gi$sdlog), breaks = 100)
+
+hist(rlnorm(1e5, true_gi$meanlog, true_gi$sdlog), breaks = 100)
+
+hist(generation_interval$truth)
+hist(generation_interval$mean_estimate)
+
+
+
+#####
+
+
+si <- contact_symptom_onset - case_symptom_onset #serial interval, period of time between person a symptoms and b symptoms
 si_sims <- calculate(si, values = draws, nsim = 1000)
 mean(si_sims[[1]])
 sd(si_sims[[1]])
@@ -132,8 +164,10 @@ mean(tost_sims[[1]])
 sd(tost_sims[[1]])
 hist(tost_sims[[1]])
 
+# BDSS - si optional, need estimates of GI 
 
-# naive estimates
+
+# naive estimates - uniferred by gi and si - biased estimates. Basically showing what not to do
 naive_data <- observations %>%
   mutate(
     across(
